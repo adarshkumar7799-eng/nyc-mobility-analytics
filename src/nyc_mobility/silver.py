@@ -17,7 +17,7 @@ def transform_silver_trips(
     and overwrites target_table. Returns the number of rows written.
     """
     trips_df = spark.table(source_table)
-    zones_df = spark.table(lookup_table)
+    zones_df = F.broadcast(spark.table(lookup_table))
 
     filtered_df = trips_df.filter(
         (F.col("fare_amount") > 0)
@@ -29,6 +29,22 @@ def transform_silver_trips(
         & (F.col("tpep_dropoff_datetime") > F.col("tpep_pickup_datetime"))
     )
 
+    # The zone lookup's location column appears as LocationID in the NYC
+    # taxi zone lookup source and as location_id in the bronze table, so
+    # resolve it case- and underscore-insensitively to support either.
+    zone_location_column = next(
+        (
+            column
+            for column in zones_df.columns
+            if column.lower().replace("_", "") == "locationid"
+        ),
+        None,
+    )
+    if zone_location_column is None:
+        raise ValueError(
+            f"Lookup table {lookup_table} has no LocationID/location_id column"
+        )
+
     # Join the zone lookup twice with distinct aliases so the pickup and
     # dropoff copies do not collide on column names.
     pu_zones = zones_df.alias("pu")
@@ -38,12 +54,12 @@ def transform_silver_trips(
         filtered_df
         .join(
             pu_zones,
-            F.col("PULocationID") == F.col("pu.location_id"),
+            F.col("PULocationID") == F.col(f"pu.{zone_location_column}"),
             "left",
         )
         .join(
             do_zones,
-            F.col("DOLocationID") == F.col("do.location_id"),
+            F.col("DOLocationID") == F.col(f"do.{zone_location_column}"),
             "left",
         )
         .select(
